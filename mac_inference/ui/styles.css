@@ -246,6 +246,9 @@ p {
 .square.in-check {
   background: #cb8372;
 }
+.square.previewed img {
+  opacity: 0.45;
+}
 .square img {
   width: 86%;
   height: 86%;
@@ -441,6 +444,53 @@ button.move-san.viewing {
   letter-spacing: -0.4px;
   margin: 0;
 }
+.footer-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 14px;
+  color: #778573;
+  cursor: pointer;
+  user-select: none;
+}
+.footer-toggle .experimental {
+  color: #a2a89c;
+}
+.footer-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.footer-toggle .switch {
+  position: relative;
+  width: 24px;
+  height: 14px;
+  border-radius: 7px;
+  background: #d8ddd2;
+  transition: background 0.15s;
+}
+.footer-toggle .switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.footer-toggle input:checked + .switch {
+  background: var(--green);
+}
+.footer-toggle input:checked + .switch::after {
+  transform: translateX(10px);
+}
+.footer-toggle input:focus-visible + .switch {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
 .model-badge {
   border: 1px solid #e1e8db;
   border-radius: 5px;
@@ -484,6 +534,102 @@ button.move-san.viewing {
 .explanation > p {
   margin: 0 0 19px;
   white-space: pre-wrap;
+}
+.notation {
+  display: inline-block;
+  padding: 0 4px 0 3px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 17px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.notation:hover {
+  border-color: var(--green);
+}
+.notation.black {
+  background: #f1f0ea;
+}
+.notation-number {
+  color: var(--muted);
+  font-weight: 500;
+  margin-right: 2px;
+}
+.notation-piece {
+  width: 14px;
+  height: 14px;
+  margin-right: 1px;
+  vertical-align: -2px;
+}
+.variation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 3px;
+  margin: -9px 0 19px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--green);
+  border-radius: 0 6px 6px 0;
+  background: #f4f5f0;
+  line-height: 1.4;
+}
+.variation-number {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.variation-label + .variation-number {
+  margin-left: 0;
+}
+.variation-label {
+  flex-basis: 100%;
+  margin-bottom: 1px;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+/* Without piece icons, moves read as bold inline text: "5...dxe5 6.fxe5". */
+.letters .notation {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 700;
+  color: inherit;
+}
+.letters .notation,
+.letters .variation-number {
+  font-variant-numeric: normal;
+}
+.letters .notation-number,
+.letters .variation-number {
+  margin: 0 0.25em 0 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 700;
+}
+/* Wider gap between move pairs: "25. a6 b6  26. Rxh2". */
+.letters .variation-number {
+  margin-left: 0.4em;
+}
+.letters .variation-label + .variation-number {
+  margin-left: 0;
+}
+.letters .variation {
+  display: block;
+  line-height: 1.8;
+}
+.letters .variation-label {
+  display: block;
 }
 .empty-explanation {
   display: flex;

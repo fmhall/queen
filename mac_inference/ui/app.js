@@ -20,6 +20,25 @@ let movesKey = "";
 let explanationKey = "";
 let viewing = null; // Index of a past QUEEN move whose explanation is shown.
 let promotionMoves = [];
+let notationMode = loadPreference("queen.notation", false);
+let pieceIcons = loadPreference("queen.pieceIcons", true);
+let preview = null; // Hovered line on the board: { position, moved, key }.
+let previewBases = []; // FENs a hovered line may start from, best first.
+
+// Storage can be unavailable (e.g. blocked site data); fall back to defaults.
+function loadPreference(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value === "on";
+  } catch {
+    return fallback;
+  }
+}
+function savePreference(key, on) {
+  try {
+    localStorage.setItem(key, on ? "on" : "off");
+  } catch {}
+}
 
 function pieces(fen) {
   const map = {};
@@ -58,10 +77,11 @@ function renderBoard() {
     orientation,
     selected,
     pending,
+    preview?.key,
   ].join("|");
   if (key === boardKey) return;
   boardKey = key;
-  const position = pieces(game.fen);
+  const position = preview ? preview.position : pieces(game.fen);
   const files = orientation === "white" ? "abcdefgh" : "hgfedcba";
   const ranks =
     orientation === "white"
@@ -85,7 +105,9 @@ function renderBoard() {
         button.classList.add("dark");
       if (piece) button.classList.add("occupied");
       if (square === selected) button.classList.add("selected");
+      if (preview?.moved.has(square)) button.classList.add("previewed");
       if (
+        !preview &&
         game.last_move &&
         [game.last_move.slice(0, 2), game.last_move.slice(2, 4)].includes(
           square,
@@ -259,17 +281,264 @@ function renderMoves() {
   $("moves").scrollTop = viewing === null ? $("moves").scrollHeight : scrollTop;
 }
 
+// QUEEN writes moves as prose: "12.white knight f1-g3", "...black pawn e6-e5",
+// "white pawn d4 takes black pawn e5". Parse them so they can be rendered as
+// notation and previewed on the board.
+const pieceLetters = {
+  pawn: "P",
+  knight: "N",
+  bishop: "B",
+  rook: "R",
+  queen: "Q",
+  king: "K",
+};
+const pieceWord = Object.keys(pieceLetters).join("|");
+const movePattern = new RegExp(
+  [
+    String.raw`(?:(?<number>\d+)\s*(?:\.\.\.|…|\.)\s*`,
+    String.raw`|(?<bareDots>\.\.\.|…))?`,
+    String.raw`(?<color>white|black) (?<piece>${pieceWord}) `,
+    String.raw`(?<from>[a-h][1-8])`,
+    String.raw`(?:-|(?<capture> takes (?:white|black) (?:${pieceWord}) ))`,
+    String.raw`(?<to>[a-h][1-8])`,
+  ].join(""),
+  "g",
+);
+
+function isCastle({ piece, from, to }) {
+  return (
+    piece === "king" &&
+    from[0] === "e" &&
+    Math.abs(to.charCodeAt(0) - from.charCodeAt(0)) === 2
+  );
+}
+
+// Returns the moves in a paragraph. `ply` is null when the text gives no
+// move number.
+function parseMoves(paragraph) {
+  const moves = [];
+  let pendingReply = null; // Ply Black answers after "15.white …".
+  for (const match of paragraph.matchAll(movePattern)) {
+    // "the white knight g1-f3" reads as prose; leave it as written.
+    if (/\bthe\s+$/i.test(paragraph.slice(0, match.index))) continue;
+    const { number, bareDots, color, piece, from, to, capture } = match.groups;
+    const white = color === "white";
+    let ply = null;
+    // The color decides the side: QUEEN writes Black's moves as "1.black …"
+    // as well as "1...black …".
+    if (number) ply = Number(number) * 2 + !white;
+    // "15.white pawn a5-a6 … ...black pawn b7-b6" means 15…b6.
+    else if (bareDots && !white && pendingReply !== null) ply = pendingReply;
+    pendingReply = ply !== null && white ? ply + 1 : null;
+    moves.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[0],
+      ply,
+      color,
+      piece,
+      from,
+      to,
+      capture: Boolean(capture),
+    });
+  }
+  return moves;
+}
+
+function moveNumber(ply, white) {
+  return Math.floor(ply / 2) + (white ? "." : "…");
+}
+
+function pieceIcon(color, piece) {
+  const image = document.createElement("img");
+  image.className = "notation-piece";
+  image.src = `/pieces/${color[0]}${pieceLetters[piece]}.svg`;
+  image.alt = `${color} ${piece}`;
+  return image;
+}
+
+function moveBadge(move, showNumber) {
+  const { color, piece, from, to, capture, ply } = move;
+  const badge = document.createElement("span");
+  badge.className = `notation ${color}`;
+  badge.title = move.text.trim();
+  if (showNumber && ply !== null) {
+    const number = document.createElement("span");
+    number.className = "notation-number";
+    number.textContent = moveNumber(ply, color === "white");
+    badge.append(number);
+  }
+  const castle = isCastle(move);
+  // Letters follow algebraic notation: pawns and castling have none.
+  if (pieceIcons) badge.append(pieceIcon(color, piece));
+  else if (piece !== "pawn" && !castle) badge.append(pieceLetters[piece]);
+  let target = to;
+  if (castle) target = to[0] === "g" ? "O-O" : "O-O-O";
+  else if (capture && pieceIcons) target = "×" + to;
+  else if (capture) target = (piece === "pawn" ? from[0] : "") + "x" + to;
+  const square = document.createElement("span");
+  square.className = "notation-square";
+  square.textContent = target;
+  badge.append(square);
+  return badge;
+}
+
+// Chains moves that continue one another (12. then 12… then 13.) into lines
+// of at least three moves. Unnumbered moves join only when they directly follow
+// the previous move; stray asides such as "…e5" are skipped.
+function variations(moves, paragraph) {
+  const lines = [];
+  let line = [];
+  const flush = () => {
+    if (line.length >= 3) lines.push(line);
+    line = [];
+  };
+  for (const move of moves) {
+    const last = line.at(-1);
+    if (!last) {
+      line.push({ move, ply: move.ply });
+    } else if (move.ply !== null) {
+      if (move.ply !== last.ply + 1) flush();
+      line.push({ move, ply: move.ply });
+    } else if (
+      move.color !== last.move.color &&
+      !paragraph.slice(last.move.end, move.start).trim()
+    ) {
+      line.push({ move, ply: last.ply === null ? null : last.ply + 1 });
+    } else if (last.ply === null) {
+      flush();
+      line.push({ move, ply: null });
+    }
+  }
+  flush();
+  return lines;
+}
+
+function annotate(paragraph) {
+  const moves = parseMoves(paragraph);
+  const lines = variations(moves, paragraph);
+  // Hovering a move previews its line up to that move.
+  const lineUpTo = new Map();
+  for (const line of lines) {
+    line.forEach(({ move }, index) =>
+      lineUpTo.set(move, line.slice(0, index + 1).map((entry) => entry.move)),
+    );
+  }
+  // Only numbered moves are marked up inline.
+  const nodes = [];
+  let last = 0;
+  for (const move of moves) {
+    if (move.ply === null) continue;
+    const badge = moveBadge(move, true);
+    previewOnHover(badge, lineUpTo.get(move) ?? [move]);
+    nodes.push(paragraph.slice(last, move.start), badge);
+    last = move.end;
+  }
+  nodes.push(paragraph.slice(last));
+  return { nodes, lines };
+}
+
+// Plays moves onto a FEN's piece map. Returns null if a move doesn't fit,
+// e.g. the line starts from a different position or skips a side's move.
+function playLine(fen, moves) {
+  const position = pieces(fen);
+  const moved = new Set();
+  let turn = fen.split(" ")[1] === "b" ? "black" : "white";
+  for (const move of moves) {
+    const { color, piece, from, to } = move;
+    const moving = position[from];
+    if (
+      color !== turn ||
+      !moving ||
+      colorOf(moving) !== color ||
+      moving.toUpperCase() !== pieceLetters[piece] ||
+      (position[to] && colorOf(position[to]) === color)
+    )
+      return null;
+    if (piece === "pawn" && from[0] !== to[0] && !position[to])
+      delete position[to[0] + from[1]]; // En passant.
+    if (isCastle(move)) {
+      const rank = from[1];
+      const [rookFrom, rookTo] = to[0] === "g" ? ["h", "f"] : ["a", "d"];
+      position[rookTo + rank] = position[rookFrom + rank];
+      delete position[rookFrom + rank];
+      moved.delete(rookFrom + rank);
+      moved.add(rookTo + rank);
+    }
+    delete position[from];
+    moved.delete(from);
+    const promotes = piece === "pawn" && (to[1] === "8" || to[1] === "1");
+    position[to] = promotes ? (color === "white" ? "Q" : "q") : moving;
+    moved.add(to);
+    turn = turn === "white" ? "black" : "white";
+  }
+  return { position, moved };
+}
+
+function showLine(moves) {
+  for (const fen of previewBases) {
+    const played = fen && playLine(fen, moves);
+    if (played) {
+      preview = { ...played, key: moves.map((m) => m.from + m.to).join(" ") };
+      renderBoard();
+      return;
+    }
+  }
+}
+
+function clearLine() {
+  if (!preview) return;
+  preview = null;
+  renderBoard();
+}
+
+function previewOnHover(element, moves) {
+  element.addEventListener("mouseenter", () => showLine(moves));
+  element.addEventListener("mouseleave", clearLine);
+}
+
+function lineBlock(line) {
+  const block = document.createElement("div");
+  block.className = "variation";
+  const label = document.createElement("span");
+  label.className = "variation-label";
+  label.textContent = "Line from QUEEN’s reasoning";
+  block.append(label);
+  // The last hovered move stays on the board until the cursor leaves the box.
+  block.addEventListener("mouseleave", clearLine);
+  const moves = line.map(({ move }) => move);
+  line.forEach(({ move, ply }, index) => {
+    const white = move.color === "white";
+    // Spaces matter for letter mode's text flow; flex layout ignores them.
+    if (index > 0) block.append(" ");
+    if (ply !== null && (white || index === 0)) {
+      const number = document.createElement("span");
+      number.className = "variation-number";
+      number.textContent = moveNumber(ply, white);
+      block.append(number);
+    }
+    const badge = moveBadge(move, false);
+    const upTo = moves.slice(0, index + 1);
+    badge.addEventListener("mouseenter", () => showLine(upTo));
+    block.append(badge);
+  });
+  return block;
+}
+
 function renderExplanation() {
   const viewed = viewing === null ? null : game.moves[viewing]?.analysis;
   const analysis = viewed || game.analysis;
   const thinking = !viewed && game.phase === "thinking";
   const text = thinking ? game.thinking_text : analysis?.text || "";
-  const key = [viewing, game.phase, text].join("|");
+  // While thinking, the explanation is about the current position.
+  previewBases = thinking ? [game.fen] : [analysis?.fen, game.fen];
+  const key = [viewing, game.phase, text, notationMode, pieceIcons].join("|");
   if (key !== explanationKey) {
     const [lastViewing, lastPhase] = explanationKey.split("|");
     const wasThinking = lastPhase === "thinking";
     const viewChanged = lastViewing !== String(viewing);
     explanationKey = key;
+    clearLine(); // The hovered element is about to be replaced.
     if (text) {
       const prose = text
         .replace(/^ANALYSIS:\s*/, "")
@@ -279,9 +548,16 @@ function renderExplanation() {
       const fragment = document.createDocumentFragment();
       prose.split(/\n\s*\n/).forEach((paragraph) => {
         const p = document.createElement("p");
-        p.textContent = paragraph;
-        fragment.append(p);
+        if (!notationMode) {
+          p.textContent = paragraph;
+          fragment.append(p);
+          return;
+        }
+        const { nodes, lines } = annotate(paragraph);
+        p.append(...nodes);
+        fragment.append(p, ...lines.map(lineBlock));
       });
+      $("explanation").classList.toggle("letters", !pieceIcons);
       $("explanation").replaceChildren(fragment);
       if (thinking) $("explanation").scrollTop = $("explanation").scrollHeight;
       else if (wasThinking || viewChanged) $("explanation").scrollTop = 0;
@@ -447,6 +723,20 @@ async function poll() {
   );
 }
 
+$("notation-toggle").checked = notationMode;
+$("icons-toggle").checked = pieceIcons;
+$("icons-toggle-label").hidden = !notationMode;
+$("notation-toggle").addEventListener("change", (event) => {
+  notationMode = event.target.checked;
+  savePreference("queen.notation", notationMode);
+  $("icons-toggle-label").hidden = !notationMode;
+  renderExplanation();
+});
+$("icons-toggle").addEventListener("change", (event) => {
+  pieceIcons = event.target.checked;
+  savePreference("queen.pieceIcons", pieceIcons);
+  renderExplanation();
+});
 $("flip").addEventListener("click", () => {
   orientation = orientation === "white" ? "black" : "white";
   render();
